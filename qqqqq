@@ -1,0 +1,795 @@
+// ConsoleApplication1.cpp: определяет точку входа для консольного приложения.
+//
+#include <Windows.h>
+#include "stdafx.h"
+#include <Windows.h>
+#include <iostream>
+#include "MemMan.h"
+#include "csgo.hpp"
+#include <thread>
+#include "ConsoleApplication1.h"
+
+MemMan MemClass;
+
+using namespace hazedumper::netvars;
+using namespace hazedumper::signatures;
+using namespace std;
+enum LifeState {
+	LIFE_ALIVE = 0,// alive
+	LIFE_DYING = 1, // playing death animation or still falling off of a ledge waiting to hit ground
+	LIFE_DEAD = 2 // dead. lying still.
+};
+struct variables
+{
+	bool firstShoot = true;
+	int myTeam;
+	uintptr_t localPlayer;
+	uintptr_t gameModule;
+	uintptr_t engineModule;
+	uintptr_t glowObject;
+	uintptr_t clientState;
+	float closestAngle;
+	uintptr_t closest;
+	//vector<float> angles;
+} val;
+
+struct ClrRender
+{
+	BYTE red, green, blue;
+};
+
+struct VectorStr
+{
+	float x, y, z;
+};
+ClrRender clrEnemy;
+ClrRender clrTeam;
+
+struct GlowStruct
+{
+	BYTE base[4];
+	float red;
+	float green;
+	float blue;
+	float alpha;
+	BYTE buffer[16];
+	bool renderWhenOccluded;
+	bool renderWhenUnOccluded;
+	bool fullBloom;
+	BYTE buffer1[5];
+	int glowStyle;
+};
+typedef struct D3DXVECTOR3 {
+	float x;
+	float y;
+	float z;
+} D3DXVECTOR3;
+typedef struct Vector {
+	float x, y, z;
+}Vector;
+
+float VMatrix[16];
+
+void GetMatrix() {
+	for (int j = 0; j < 16; j++)
+		VMatrix[j] = MemClass.readMem<float>(val.gameModule + dwViewMatrix + (j * 0x4));
+}
+
+
+//float VMatrix[4][4] = MemClass.readMem<float[16]>(val.clientState + dwViewMatrix);
+//float m_fMatrix[4][4];
+//ReadProcessMemory(gProcess.hProcess, (PBYTE*)(gProcess.dwClient + dwViewMatrix), &m_fMatrix, sizeof(m_fMatrix), NULL);
+//ReadProcessMemory(gameModule, (DWORD*)(client + dwViewMatrix), &flMatrix, sizeof(flMatrix), 0);
+//Memory::RPM(Memory::GetModule("client") + Offsets::CViewMatrix, &pMatrix, sizeof(pMatrix));
+
+// Usage
+
+//if (WorldToScreen(pEntity->EyePosition(), Screen, pMatrix))
+//{
+	// DrawPlayer
+//}
+
+void handleRcs()
+{
+	Vector OldAimPunch{ 0, 0, 0 };
+	while (true)
+	{
+		int isShooting = MemClass.readMem<int>(val.gameModule + dwForceAttack);
+		int shotsFired = MemClass.readMem<int>(val.localPlayer + m_iShotsFired);
+	
+		if (isShooting == 5 and !GetAsyncKeyState(VK_RBUTTON) and shotsFired > 1)
+		{
+			
+			Vector AimPunch = MemClass.readMem<Vector>(val.localPlayer + m_aimPunchAngle);
+			
+	
+				AimPunch.x *= 2.f;
+				AimPunch.y *= 2.f;
+				AimPunch.z *= 2.f;
+
+				Vector CurrentViewAngles = MemClass.readMem<Vector>(val.clientState + dwClientState_ViewAngles);
+				
+				Vector NewViewAngles;
+				NewViewAngles.x = CurrentViewAngles.x + OldAimPunch.x - AimPunch.x;
+				NewViewAngles.y = CurrentViewAngles.y + OldAimPunch.y - AimPunch.y;
+				NewViewAngles.z = CurrentViewAngles.z + OldAimPunch.z - AimPunch.z;
+
+
+				OldAimPunch = AimPunch;
+				if (NewViewAngles.y > 180.0f)
+				{
+					NewViewAngles.y -= 360.0f;
+				}
+				else if (NewViewAngles.y < -180.0f)
+				{
+					NewViewAngles.y += 360.0f;
+				}
+				if (NewViewAngles.x > 180.0f)
+				{
+					NewViewAngles.x -= 360.0f;
+				}
+				else if (NewViewAngles.x < -180.0f)
+				{
+					NewViewAngles.x += 360.0f;
+				}
+
+				if (NewViewAngles.x >= 89.0f)
+				{
+					NewViewAngles.x = 89.0f;
+				}
+				else if (NewViewAngles.x <= -89.0f)
+				{
+					NewViewAngles.x = -89.0f;
+				}
+				
+				MemClass.writeMem<Vector>(val.clientState + dwClientState_ViewAngles, NewViewAngles);
+			
+		}
+		else
+		{
+			OldAimPunch.x = OldAimPunch.y = OldAimPunch.z = 0;
+
+		}
+		Sleep(1);
+	}
+}
+D3DXVECTOR3 WorldToScreen_(D3DXVECTOR3 from)
+{
+	GetMatrix();
+	float w = 0.0f;
+	D3DXVECTOR3 ret;
+
+	ret.x = VMatrix[0] * from.x + VMatrix[1] * from.y + VMatrix[2] * from.z + VMatrix[3];
+	ret.y = VMatrix[4] * from.x + VMatrix[5] * from.y + VMatrix[6] * from.z + VMatrix[7];
+	w = VMatrix[12] * from.x + VMatrix[13] * from.y + VMatrix[14] * from.z + VMatrix[15];
+
+	if (w < 0.01f)
+		return D3DXVECTOR3{ 0, 0, 0 };
+
+	float invw = 1.0f / w;
+	ret.x *= invw;
+	ret.y *= invw;
+
+	int width = GetSystemMetrics(SM_CXSCREEN);
+	int height = GetSystemMetrics(SM_CYSCREEN);
+
+	float x = width / 2;
+	float y = height / 2;
+
+	x += 0.5f * ret.x * width + 0.5f;
+	y -= 0.5f * ret.y * height + 0.5f;
+
+	ret.x = x;
+	ret.y = y;
+	ret.z = w;
+
+	return ret;
+
+}
+
+/*void AimAtPos(float x, float y)
+{
+	bool smooth = false;
+	float AimSpeed = 5;
+	//By fredaikis
+	float ScreenCenterX = (1920.0f / 2);
+	float ScreenCenterY = (1080.0f / 2);
+	float TargetX = 0;
+	float TargetY = 0;
+	if (x != 0)
+	{
+		if (x > ScreenCenterX)
+		{
+			TargetX = -(ScreenCenterX - x);
+			TargetX /= AimSpeed;
+			if (TargetX + ScreenCenterX > ScreenCenterX * 2) TargetX = 0;
+		}
+
+		if (x < ScreenCenterX)
+		{
+			TargetX = x - ScreenCenterX;
+			TargetX /= AimSpeed;
+			if (TargetX + ScreenCenterX < 0) TargetX = 0;
+		}
+	}
+	if (y != 0)
+	{
+		if (y > ScreenCenterY)
+		{
+			TargetY = -(ScreenCenterY - y);
+			TargetY /= AimSpeed;
+			if (TargetY + ScreenCenterY > ScreenCenterY * 2) TargetY = 0;
+		}
+
+		if (y < ScreenCenterY)
+		{
+			TargetY = y - ScreenCenterY;
+			TargetY /= AimSpeed;
+			if (TargetY + ScreenCenterY < 0) TargetY = 0;
+		}
+	}
+	if (!smooth)
+	{
+		mouse_event(0x0001, (unsigned int)(TargetX), (unsigned int)(TargetY), NULL, NULL);
+		return;
+	}
+	TargetX /= 10;
+	TargetY /= 10;
+	if (abs(TargetX) < 1)
+	{
+		if (TargetX > 0)
+		{
+			TargetX = 1;
+		}
+		if (TargetX < 0)
+		{
+			TargetX = -1;
+		}
+	}
+	if (abs(TargetY) < 1)
+	{
+		if (TargetY > 0)
+		{
+			TargetY = 1;
+		}
+		if (TargetY < 0)
+		{
+			TargetY = -1;
+		}
+	}
+	mouse_event(0x0001, (unsigned int)TargetX, (unsigned int)TargetY, NULL, NULL);
+}*/
+void AimAtPos(float x, float y)
+{
+	//int ScreenCenterX = 960;
+	//int ScreenCenterY = 540;
+
+	int width = GetSystemMetrics(SM_CXSCREEN);
+	int height = GetSystemMetrics(SM_CYSCREEN);
+	int ScreenCenterY = height * 0.5f;
+	int ScreenCenterX = width * 0.5f;
+	bool smooth = false;
+	float AimSpeed = 6;
+	float TargetX = 0;
+	float TargetY = 0;
+
+	//X Axis
+	if (x != 0)
+	{
+		if (x > ScreenCenterX)
+		{
+			TargetX = -(ScreenCenterX - x);
+			TargetX /= AimSpeed;
+			if (TargetX + ScreenCenterX > ScreenCenterX * 2) TargetX = 0;
+		}
+
+		if (x < ScreenCenterX)
+		{
+			TargetX = x - ScreenCenterX;
+			TargetX /= AimSpeed;
+			
+			if (TargetX + ScreenCenterX < 0) TargetX = 0;
+		}
+	}
+
+	//Y Axis
+
+	if (y != 0)
+	{
+		if (y > ScreenCenterY)
+		{
+			TargetY = -(ScreenCenterY - y);
+			TargetY /= AimSpeed;
+			if (TargetY + ScreenCenterY > ScreenCenterY * 2) TargetY = 0;
+		}
+
+		if (y < ScreenCenterY)
+		{
+			TargetY = y - ScreenCenterY;
+			TargetY /= AimSpeed;
+			if (TargetY + ScreenCenterY < 0) TargetY = 0;
+		}
+	}
+
+	if (!smooth)
+	{
+		mouse_event(MOUSEEVENTF_MOVE, (DWORD)(TargetX), (DWORD)(TargetY), NULL, NULL);
+		return;
+	}
+
+	TargetX /= 10;
+	TargetY /= 10;
+
+	//Mouse even't will round to 0 a lot of the time, so we can add this, to make it more accurrate on slow speeds.
+	if (fabs(TargetX) < 1)
+	{
+		if (TargetX > 0)
+		{
+			TargetX = 1;
+		}
+		if (TargetX < 0)
+		{
+			TargetX = -1;
+		}
+	}
+	if (fabs(TargetY) < 1)
+	{
+		if (TargetY > 0)
+		{
+			TargetY = 1;
+		}
+		if (TargetY < 0)
+		{
+			TargetY = -1;
+		}
+	}
+	mouse_event(MOUSEEVENTF_MOVE, TargetX, TargetY, NULL, NULL);
+}
+
+
+vector<float> calcAngle(vector<float> src, float dst[3])
+{
+
+	vector<float> angles = { 0 ,0 ,0};
+	
+	
+	double delta[3] = { (src[0] - dst[0]), (src[1] - dst[1]), (src[2] - dst[2]) };
+	//cout << delta[2] << endl;
+	// << src[2] << endl;
+	//cout << dst[2] << endl;
+	double hyp = sqrt(delta[0] * delta[0] + delta[1] * delta[1]);
+	angles[0] = (float)(atan2f(delta[2], hyp) * 57.295779513082f);
+	angles[1] = (float)(atanf(delta[1] / delta[0]) * 57.295779513082f);
+	angles[2] = 0.0f;
+	
+	
+	if (delta[0] >= 0.0) { angles[1] += 180.0f; }
+	
+	while (angles[0] > 180.0f)
+	{
+		angles[0] -= 360.0f;
+	}
+	while (angles[0] < -180.0f)
+	{
+		angles[0] += 360.0f;
+	}
+	while (angles[1] > 180.0f)
+	{
+		angles[1] -= 360.0f;
+	}
+	while (angles[1] < -180.0f)
+	{
+		angles[1] += 360.0f;
+	}
+	
+	if (angles[0] >= 89.0f)
+	{
+		angles[0] = 89.0f;
+	} 
+	else if (angles[0] <= -89.0f)
+	{
+		angles[0] = -89.0f;
+	}
+	
+	return angles;
+}
+vector<float> getHeadPosition(uintptr_t entity)
+{
+	uintptr_t bones = MemClass.readMem<uintptr_t>(entity + m_dwBoneMatrix);
+	float enemyHeadX = MemClass.readMem<float>(bones + 0x30 * 8 + 0x0C);
+	float enemyHeadY = MemClass.readMem<float>(bones + 0x30 * 8 + 0x1C);
+	float enemyHeadZ = MemClass.readMem<float>(bones + 0x30 * 8 + 0x2C);
+
+	vector<float> enemyHeadPos = { enemyHeadX, enemyHeadY, enemyHeadZ };
+	return enemyHeadPos;
+	//cout << enemyHeadX << endl;
+	//cout << enemyHeadY << endl;
+	//cout << enemyHeadZ << endl;
+}
+
+//TODO change to W2S
+void findClosest()
+{
+	for (short int i = 0; i < 64; i++)
+	{
+		uintptr_t entity = MemClass.readMem<uintptr_t>(val.gameModule + dwEntityList + i * 0x10);
+		bool dormant = MemClass.readMem<bool>(entity + m_bDormant);
+		int health = MemClass.readMem<int>(entity + m_iHealth);
+		if (!dormant && health>0)
+		{
+
+			int entityTeam = MemClass.readMem<int>(entity + m_iTeamNum);
+			if (val.myTeam != entityTeam)
+			{
+
+				//VectorStr vecOrigin = MemClass.readMem<VectorStr>(val.localPlayer + m_vecOrigin);
+				//VectorStr vecOffset = MemClass.readMem<VectorStr>(val.localPlayer + m_vecViewOffset);
+				//vector<float> vec{ vecOrigin.x + vecOffset.x, vecOrigin.y + vecOffset.y, vecOrigin.z + vecOffset.z };
+				vector<float> enemyPos = getHeadPosition(entity);
+
+				//float enemyPosArr[3] = { enemyPos[0], enemyPos[1], enemyPos[2] };
+				//vector<float> angles = calcAngle(vec, enemyPosArr);
+				//VectorStr playerAngles = MemClass.readMem<VectorStr>(val.clientState + dwClientState_ViewAngles);
+				D3DXVECTOR3 from{ enemyPos[0] ,  enemyPos[1] ,  enemyPos[2] };
+				D3DXVECTOR3 ret = WorldToScreen_(from);
+				float xdif = ret.x- GetSystemMetrics(SM_CXSCREEN)/2;
+				float ydif = ret.y- GetSystemMetrics(SM_CYSCREEN)/2;
+				float hyp = sqrt(xdif * xdif + ydif * ydif);
+				float max = 55.f;
+				//AimAtPos(ret.x, ret.y);
+				//Sleep(3000);
+				//float yawDif = abs(angles[1] - playerAngles.y);
+				//float pithDif = abs(angles[0] - playerAngles.x);
+				//float hyp = sqrt(yawDif * yawDif + pithDif * pithDif);
+				
+				
+					//float realDist = sin(yawDif * 3.14159265359 / 180) * angles[3];
+				//0000000cout << yawDif << endl;
+				//Sleep(1000);0wd
+
+
+					if (hyp < val.closestAngle and hyp <= max)
+					{
+					//TODO добавить переменную с количеством захватов цели, обнулять при отжатии пкм, если она > 1, то менять цель после движения мыши.	
+					val.closest = entity;
+						
+					val.closestAngle = hyp;
+					}
+				
+				
+			}
+
+		}
+		
+	}
+}
+void aimAt(uintptr_t entity)
+{
+	
+	int health = MemClass.readMem<int>(entity + m_iHealth);
+	
+	
+	if (entity != 0 && health > 0)
+	{
+		
+		VectorStr vecOrigin = MemClass.readMem<VectorStr>(val.localPlayer + m_vecOrigin);
+		VectorStr vecOffset = MemClass.readMem<VectorStr>(val.localPlayer + m_vecViewOffset);
+		vector<float> vec{ vecOrigin.x + vecOffset.x, vecOrigin.y + vecOffset.y, vecOrigin.z + vecOffset.z };
+
+		vector<float> enemyPos = getHeadPosition(entity);
+		float enemyPosArr[3] = { enemyPos[0], enemyPos[1], enemyPos[2] };
+		vector<float> angles = calcAngle(vec, enemyPosArr);
+		VectorStr anglesStr;
+		
+		
+
+
+
+
+		if (angles[0] > 180.0f)
+		{
+			angles[0] -= 360.0f;
+		}
+		else if (angles[0] < -180.0f)
+		{
+			angles[0] += 360.0f;
+		}
+		if (angles[1] > 180.0f)
+		{
+			angles[1] -= 360.0f;
+		}
+		else if (angles[1] < -180.0f)
+		{
+			angles[1] += 360.0f;
+		}
+
+		if (angles[0] >= 89.0f)
+		{
+			angles[0] = 89.0f;
+		}
+		else if (angles[0] <= -89.0f)
+		{
+			angles[0] = -89.0f;
+		}
+		if (!isnan(angles[0]) && !isnan(angles[1]))
+		{
+			
+			anglesStr.x = angles[0]; //y
+			anglesStr.y = angles[1]; //x
+			anglesStr.z = 0.0f;
+			MemClass.writeMem<VectorStr>(val.clientState + dwClientState_ViewAngles, anglesStr);
+			
+		}
+		//cout << "0:" << endl;
+		
+		
+	}
+	else
+	{
+		//val.checkAlive = true;
+	}
+
+	//Sleep(1);
+
+
+
+}
+bool isCross() 
+{
+
+	int id = MemClass.readMem<int>(val.localPlayer + m_iCrosshairId);
+	if (id > 0 and id <= 64)
+	{
+		uintptr_t entity = MemClass.readMem<uintptr_t>(val.gameModule + dwEntityList + (id-1) * 0x10);
+		bool dormant = MemClass.readMem<bool>(entity + m_bDormant);
+		int health = MemClass.readMem<int>(entity + m_iHealth);
+		if (!dormant and health > 0)
+		{
+			val.closest = entity;
+			return true;
+		}
+		else
+		{
+			return false;
+		}
+	}
+	else 
+	{
+		return false;
+	}
+	
+
+}
+void LeftClick()
+{
+	INPUT    Input = { 0 };
+	// left down 
+	Input.type = INPUT_MOUSE;
+	Input.mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
+	::SendInput(1, &Input, sizeof(INPUT));
+
+	// left up
+	::ZeroMemory(&Input, sizeof(INPUT));
+	Input.type = INPUT_MOUSE;
+	Input.mi.dwFlags = MOUSEEVENTF_LEFTUP;
+	::SendInput(1, &Input, sizeof(INPUT));
+}
+void handleAim()
+{
+	int fired = 0;
+	while (true)
+	{
+		
+		if (GetAsyncKeyState(VK_RBUTTON))
+		{
+			//cout << "press" << endl;
+			//if (val.checkAlive)
+			//{
+				//cout << "1" << endl;
+			
+			if (isCross())
+			{
+				aimAt(val.closest);
+				
+				if (fired == 0 and val.firstShoot)
+				{
+					
+					Sleep(10);
+					LeftClick();
+					fired += 1;
+				}
+				
+			}
+			else
+			{
+				
+				val.closest = 0;
+				val.closestAngle = 100000000000.0f;
+				findClosest();
+				aimAt(val.closest);
+				
+			}
+
+				
+				
+			
+			
+			
+		}
+		else
+		{
+			
+			fired = 0;
+			
+		}
+		
+			
+		
+		
+		Sleep(1);
+	}
+}
+
+
+
+
+
+GlowStruct SetGlowColor(GlowStruct Glow, uintptr_t entity)
+{
+	bool defusing = MemClass.readMem<bool>(entity + m_bIsDefusing);
+	if (defusing)
+	{
+		Glow.red = 1.0f;
+		Glow.green = 1.0f;
+		Glow.blue = 1.0f;
+	}
+	else
+	{
+		int health = MemClass.readMem<int>(entity + m_iHealth);
+		Glow.red = health * -0.01 + 1;
+		Glow.green = health * 0.01;
+	}
+	Glow.alpha = 1.0f;
+	Glow.renderWhenOccluded = true;
+	Glow.renderWhenUnOccluded = false;
+	return Glow;
+}
+GlowStruct SetGlowColorTeam(GlowStruct Glow, uintptr_t entity)
+{
+	Glow.blue = 1.0f;
+	Glow.alpha = 1.0f;
+	Glow.renderWhenOccluded = true;
+	Glow.renderWhenUnOccluded = false;
+	return Glow;
+}
+
+void SetTeamGlow(uintptr_t entity, int glowIndex)
+{
+	GlowStruct TGlow;
+	GlowStruct TGlowNew;
+	TGlow = MemClass.readMem<GlowStruct>(val.glowObject + (glowIndex * 0x38));
+	TGlowNew = SetGlowColorTeam(TGlow, entity);
+
+
+	if (TGlowNew.green != TGlow.green || TGlowNew.blue != TGlow.blue || TGlowNew.alpha != TGlow.alpha || TGlowNew.renderWhenOccluded != TGlow.renderWhenOccluded || TGlowNew.renderWhenUnOccluded != TGlow.renderWhenUnOccluded)
+	{
+		MemClass.writeMem<GlowStruct>(val.glowObject + (glowIndex * 0x38), TGlowNew);
+	}
+}
+
+void SetEnemyGlow(uintptr_t entity, int glowIndex)
+{
+	GlowStruct EGlow;
+	GlowStruct EGlowNew;
+	EGlow = MemClass.readMem<GlowStruct>(val.glowObject + (glowIndex * 0x38));
+	EGlowNew = SetGlowColor(EGlow, entity);
+	if (EGlowNew.red != EGlow.red || EGlowNew.blue != EGlow.blue || EGlowNew.alpha != EGlow.alpha || EGlowNew.renderWhenOccluded != EGlow.renderWhenOccluded || EGlowNew.renderWhenUnOccluded != EGlow.renderWhenUnOccluded)
+	{
+		MemClass.writeMem<GlowStruct>(val.glowObject + (glowIndex * 0x38), EGlowNew);
+	}
+
+}
+
+void HandleGlow()
+{
+	val.glowObject = MemClass.readMem<uintptr_t>(val.gameModule + dwGlowObjectManager);
+
+
+	for (short int i = 0; i < 64; i++)
+	{
+		uintptr_t entity = MemClass.readMem<uintptr_t>(val.gameModule + dwEntityList + i * 0x10);
+		bool dormant = MemClass.readMem<bool>(entity + m_bDormant);
+		if (!dormant)
+		{
+
+			int glowIndx = MemClass.readMem<int>(entity + m_iGlowIndex);
+			int entityTeam = MemClass.readMem<int>(entity + m_iTeamNum);
+			//int myTeam = MemClass.readMem<int>(val.localPlayer + m_iTeamNum);
+			//cout << val.myTeam << endl;
+			//cout << "they "+ entityTeam << endl;
+			if (val.myTeam == entityTeam)
+			{
+
+				MemClass.writeMem<ClrRender>(entity + m_clrRender, clrTeam);
+				SetTeamGlow(entity, glowIndx);
+			}
+			else
+			{
+
+			//	MemClass.writeMem<float>(val.glowObject + ((entity * 0x38) + 0x4), 2);
+				//MemClass.writeMem<float>(val.glowObject + ((entity * 0x38) + 0x8), 0);
+				//MemClass.writeMem<float>(val.glowObject + ((entity * 0x38) + 0xc), 0);
+			//	MemClass.writeMem<float>(val.glowObject + ((entity * 0x38) + 0x10), 1.7);
+			//	MemClass.writeMem<bool>(val.glowObject + ((entity * 0x38) + 0x24), true);
+			//	MemClass.writeMem<bool>(val.glowObject + ((entity * 0x38) + 0x25), false);
+				MemClass.writeMem<bool>(entity + m_bSpotted, true);
+				MemClass.writeMem<ClrRender>(entity + m_clrRender, clrEnemy);
+				SetEnemyGlow(entity, glowIndx);
+			}
+		}
+	}
+}
+
+void SetBrightness()
+{
+	clrTeam.red = 0;
+	clrTeam.blue = 255;
+	clrTeam.green = 0;
+
+	clrEnemy.red = 255;
+	clrEnemy.blue = 0;
+	clrEnemy.green = 0;
+
+	float brightness = 7.0f;
+
+	int ptr = MemClass.readMem<int>(val.engineModule + model_ambient_min);
+	int xorptr = *(int*)&brightness ^ ptr;
+	MemClass.writeMem<int>(val.engineModule + model_ambient_min, xorptr);
+}
+
+int main()
+{
+	int procID = MemClass.getProcess(L"csgo.exe");
+	val.gameModule = MemClass.getModule(procID, L"client_panorama.dll");
+	val.engineModule = MemClass.getModule(procID, L"engine.dll");
+
+
+	if (val.localPlayer == NULL)
+		while (val.localPlayer == NULL)
+			val.localPlayer = MemClass.readMem<uintptr_t>(val.gameModule + dwLocalPlayer);
+	val.myTeam = MemClass.readMem<int>(val.localPlayer + m_iTeamNum);
+	SetBrightness();
+	//byte check = MemClass.readMem<BYTE>(val.gameModule + force_update_spectator_glow);
+	//cout << check << endl;
+	MemClass.writeMem<BYTE>(val.gameModule + force_update_spectator_glow, 0xEB); //switch on 0x74
+	
+	val.clientState = MemClass.readMem<uintptr_t>(val.engineModule + dwClientState);
+	thread aimThread(handleAim);
+	thread rcsThread(handleRcs);
+
+	while (true)
+	{
+		//int localHealth = MemClass.readMem<int>(val.localPlayer + m_iHealth);
+		if (GetAsyncKeyState(VK_NUMPAD0))
+		{
+			val.localPlayer = MemClass.readMem<uintptr_t>(val.gameModule + dwLocalPlayer);
+			val.myTeam = MemClass.readMem<int>(val.localPlayer + m_iTeamNum);
+			val.clientState = MemClass.readMem<uintptr_t>(val.engineModule + dwClientState);
+			MemClass.writeMem<BYTE>(val.gameModule + force_update_spectator_glow, 0x74); //switch on 0x74
+			Sleep(3);
+			MemClass.writeMem<BYTE>(val.gameModule + force_update_spectator_glow, 0xEB);
+
+		}
+		if (GetAsyncKeyState(VK_NUMPAD1))
+		{
+			val.firstShoot = !val.firstShoot;
+			cout << val.firstShoot << endl;
+			Sleep(100);
+		}
+		HandleGlow();
+
+		Sleep(1);
+	}
+	return 0;
+}
+
